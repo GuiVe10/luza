@@ -478,6 +478,16 @@ function closeModalDirect(){document.getElementById('modal-overlay').classList.r
 
 updateDate();
 loadFromServer();
+
+// Auto-refresh cada 3 minutos
+setInterval(function(){
+    loadFromServer();
+},180000);
+
+// Refresh cuando vuelve del segundo plano
+document.addEventListener('visibilitychange',function(){
+    if(!document.hidden) loadFromServer();
+});
 </script>
 </body>
 </html>
