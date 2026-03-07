@@ -319,13 +319,19 @@ async function loadFromServer(){
 function save(){
     clearTimeout(saveTimeout);
     showSaveStatus('saving','Guardando...');
-    saveTimeout=setTimeout(async function(){
+    saveTimeout=setTimeout(function(){
         try{
-            const encoded=encodeURIComponent(JSON.stringify(db));
-            const resp=await fetch(API_URL+'?action=saveAll&data='+encoded);
-            const result=await resp.json();
-            if(result.error) throw new Error(result.error);
-            showSaveStatus('saved','Guardado');
+            fetch(API_URL+'?action=saveAll',{
+                method:'POST',
+                mode:'no-cors',
+                headers:{'Content-Type':'text/plain'},
+                body:JSON.stringify(db)
+            }).then(function(){
+                showSaveStatus('saved','Guardado');
+            }).catch(function(err){
+                console.error('Save error:',err);
+                showSaveStatus('error','Error');
+            });
         }catch(err){console.error('Save error:',err);showSaveStatus('error','Error');}
     },600);
 }
