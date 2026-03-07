@@ -319,29 +319,14 @@ async function loadFromServer(){
 function save(){
     clearTimeout(saveTimeout);
     showSaveStatus('saving','Guardando...');
-    saveTimeout=setTimeout(function(){
-        // Use hidden iframe + form to POST without CORS issues
-        let iframe=document.getElementById('save-iframe');
-        if(!iframe){
-            iframe=document.createElement('iframe');
-            iframe.id='save-iframe';
-            iframe.name='save-iframe';
-            iframe.style.display='none';
-            document.body.appendChild(iframe);
-        }
-        const form=document.createElement('form');
-        form.method='POST';
-        form.action=API_URL+'?action=saveAll';
-        form.target='save-iframe';
-        const input=document.createElement('input');
-        input.type='hidden';
-        input.name='data';
-        input.value=JSON.stringify(db);
-        form.appendChild(input);
-        document.body.appendChild(form);
-        iframe.onload=function(){showSaveStatus('saved','Guardado');};
-        form.submit();
-        document.body.removeChild(form);
+    saveTimeout=setTimeout(async function(){
+        try{
+            const encoded=encodeURIComponent(JSON.stringify(db));
+            const resp=await fetch(API_URL+'?action=saveAll&data='+encoded);
+            const result=await resp.json();
+            if(result.error) throw new Error(result.error);
+            showSaveStatus('saved','Guardado');
+        }catch(err){console.error('Save error:',err);showSaveStatus('error','Error');}
     },600);
 }
 
