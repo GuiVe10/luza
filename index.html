@@ -288,7 +288,8 @@ function updateHomeSubs(){
     document.getElementById('home-clases-sub').textContent=db.horarios.length+' horarios · '+db.dias.length+' días';
     const mk=mesActualKey();
     let tC=0;db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);});
-    document.getElementById('home-pagos-sub').textContent='$'+tC.toLocaleString('es-AR')+' cobrado';
+    const tS=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk)).reduce((s,cs)=>s+cs.monto,0);
+    document.getElementById('home-pagos-sub').textContent='$'+(tC+tS).toLocaleString('es-AR')+' cobrado';
 }
 
 // === SERVER SYNC ===
@@ -392,10 +393,14 @@ function renderPagos(){
     const mk=mesActualKey();let tE=0,tC=0,ap=[];
     db.alumnos.forEach(a=>{const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);tE+=pr;tC+=pg;ap.push({id:a.id,nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});});
     const slM=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk));const tS=slM.reduce((s,cs)=>s+cs.monto,0);const tF=tC+tS,pC=Math.max(0,tE-tC);
-    let tEf=0,tTr=0;db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});tEf+=tS;
+    let tEf=0,tTr=0;db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
+    // Las clases sueltas siempre suman a efectivo (se cobran en el momento)
+    tEf+=tS;
     let h='<div class="section-title" style="margin-top:0">'+mesNombre(mk).toUpperCase()+'</div><div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+tF.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(pC>0?'var(--red)':'var(--green)')+'">$'+pC.toLocaleString('es-AR')+'</div></div></div>';
     h+='<div class="card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-around;text-align:center"><div><div style="font-size:.65em;font-weight:700;color:var(--yellow);letter-spacing:1px">EFECTIVO</div><div style="font-size:1.1em;font-weight:700">$'+tEf.toLocaleString('es-AR')+'</div></div><div style="width:1px;background:var(--border)"></div><div><div style="font-size:.65em;font-weight:700;color:var(--accent);letter-spacing:1px">TRANSFERENCIA</div><div style="font-size:1.1em;font-weight:700">$'+tTr.toLocaleString('es-AR')+'</div></div></div></div>';
-    if(tS>0)h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div></div>';
+    if(slM.length>0)h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div>';
+    // Detalle de cada clase suelta del mes
+    if(slM.length>0){slM.forEach(cs=>{h+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:.78em"><span style="color:var(--text2)">'+cs.nombre+' · '+cs.dia+' '+cs.hora+'</span><span style="font-weight:600">$'+cs.monto.toLocaleString('es-AR')+'</span></div>';});h+='</div>';}
     h+='<div class="section-title">ALUMNOS</div>';
     ap.forEach(a=>{const d=a.precio-a.pagado;h+='<div class="pago-alumno-row" onclick="openPagoForm(\''+a.id+'\')"><div><div style="font-weight:600;font-size:.9em">'+a.nombre+'</div><div style="font-size:.7em;color:var(--text2)">'+a.plan+' · $'+a.precio.toLocaleString('es-AR')+'</div></div><div style="text-align:right"><div style="font-weight:700;font-size:.85em;color:'+(d>0?'var(--red)':'var(--green)')+'">'+(d>0?'Debe $'+d.toLocaleString('es-AR'):'AL DÍA')+'</div><div style="font-size:.65em;color:var(--text2)">Pagó $'+a.pagado.toLocaleString('es-AR')+'</div></div></div>';});
     if(db.mesesCerrados.length){
@@ -423,9 +428,34 @@ function toggleFalta(n){const lid=curDay+'_'+curHora;const i=db.logs[lid].findIn
 let tipoCupo='suelta';
 function setTipoCupo(t){tipoCupo=t;document.getElementById('tipo-suelta').classList.toggle('active',t==='suelta');document.getElementById('tipo-recup').classList.toggle('active',t==='recupero');const sel=document.getElementById('modal-sel');const vo=sel.querySelector('option[value="__VIS__"]');if(vo)vo.style.display=t==='recupero'?'none':'';if(sel.value==='__VIS__'&&t==='recupero'){sel.value='';document.getElementById('modal-vis').style.display='none';}}
 
-function addCupo(){const sel=document.getElementById('modal-sel').value;let nom=sel==='__VIS__'?document.getElementById('modal-vis').value.trim():sel;if(!nom)return;const lid=curDay+'_'+curHora;if(tipoCupo==='recupero'){db.logs[lid].push({n:nom,t:'r'});}else{const pr=db.precioClaseSuelta||0;db.logs[lid].push({n:nom,t:'e',paid:pr});if(pr>0)db.clasesSueltas.push({nombre:nom,fecha:new Date().toISOString().slice(0,10),monto:pr,dia:curDay,hora:curHora});}tipoCupo='suelta';save();openClaseModal(curHora);renderClases();}
+function addCupo(){
+    const sel=document.getElementById('modal-sel').value;
+    let nom=sel==='__VIS__'?document.getElementById('modal-vis').value.trim():sel;
+    if(!nom)return;
+    const lid=curDay+'_'+curHora;
+    if(tipoCupo==='recupero'){
+        db.logs[lid].push({n:nom,t:'r'});
+    }else{
+        const pr=db.precioClaseSuelta||0;
+        const fechaHoy=new Date().toISOString().slice(0,10);
+        db.logs[lid].push({n:nom,t:'e',paid:pr,fecha:fechaHoy});
+        // Siempre registrar en clasesSueltas, incluso si el precio es 0
+        db.clasesSueltas.push({nombre:nom,fecha:fechaHoy,monto:pr,dia:curDay,hora:curHora});
+    }
+    tipoCupo='suelta';
+    save();openClaseModal(curHora);renderClases();
+}
 
-function removeExtra(i){const lid=curDay+'_'+curHora;const exts=db.logs[lid].filter(l=>l.t==='e');const t=exts[i];if(t.paid){const ci=db.clasesSueltas.findIndex(cs=>cs.nombre===t.n&&cs.dia===curDay&&cs.hora===curHora);if(ci>-1)db.clasesSueltas.splice(ci,1);}db.logs[lid].splice(db.logs[lid].indexOf(t),1);save();openClaseModal(curHora);renderClases();}
+function removeExtra(i){
+    const lid=curDay+'_'+curHora;
+    const exts=db.logs[lid].filter(l=>l.t==='e');
+    const t=exts[i];
+    // Buscar en clasesSueltas usando fecha del log para evitar borrar entrada equivocada
+    const ci=db.clasesSueltas.findIndex(cs=>cs.nombre===t.n&&cs.dia===curDay&&cs.hora===curHora&&cs.fecha===t.fecha);
+    if(ci>-1)db.clasesSueltas.splice(ci,1);
+    db.logs[lid].splice(db.logs[lid].indexOf(t),1);
+    save();openClaseModal(curHora);renderClases();
+}
 function removeRecupero(i){const lid=curDay+'_'+curHora;const rcs=db.logs[lid].filter(l=>l.t==='r');db.logs[lid].splice(db.logs[lid].indexOf(rcs[i]),1);save();openClaseModal(curHora);renderClases();}
 
 function openAlumnoForm(eId){
