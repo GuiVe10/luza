@@ -294,6 +294,7 @@ function updateHomeSubs(){
 
 // === SERVER SYNC ===
 async function loadFromServer(){
+    if(savePending){console.log('Load bloqueado: save pendiente');return;}
     const el=document.getElementById('loading-status');
     if(el) el.textContent='Cargando datos...';
     try{
@@ -317,23 +318,35 @@ async function loadFromServer(){
     }
 }
 
+let savePending=false;
 function save(){
     clearTimeout(saveTimeout);
     showSaveStatus('saving','Guardando...');
-    saveTimeout=setTimeout(function(){
+    savePending=true;
+    saveTimeout=setTimeout(async function(){
         try{
-            fetch(API_URL+'?action=saveAll',{
+            const resp=await fetch(API_URL+'?action=saveAll',{
                 method:'POST',
-                mode:'no-cors',
                 headers:{'Content-Type':'text/plain'},
-                body:JSON.stringify(db)
-            }).then(function(){
-                showSaveStatus('saved','Guardado');
-            }).catch(function(err){
-                console.error('Save error:',err);
-                showSaveStatus('error','Error');
+                body:JSON.stringify(db),
+                redirect:'follow'
             });
-        }catch(err){console.error('Save error:',err);showSaveStatus('error','Error');}
+            const result=await resp.json();
+            if(result.ok){showSaveStatus('saved','Guardado');}
+            else{showSaveStatus('error','Error');}
+        }catch(err){
+            try{
+                const resp2=await fetch(API_URL+'?action=saveAll&data='+encodeURIComponent(JSON.stringify(db)));
+                const result2=await resp2.json();
+                if(result2.ok){showSaveStatus('saved','Guardado');}
+                else{showSaveStatus('error','Error');}
+            }catch(err2){
+                console.error('Save error:',err2);
+                showSaveStatus('error','Error de red');
+            }
+        }finally{
+            savePending=false;
+        }
     },600);
 }
 
@@ -415,10 +428,17 @@ function toggleAccordion(i){document.getElementById('accordion-'+i).classList.to
 
 function openClaseModal(h){
     curHora=h;const lid=curDay+'_'+h;if(!db.logs[lid])db.logs[lid]=[];
-    const fij=db.alumnos.filter(a=>a.clases.includes(curDay+' '+h));const hoy=todayKey();const logsHoy=(db.logs[lid]).filter(l=>l.fecha===hoy);const fN=logsHoy.filter(l=>l.t==='f').map(l=>l.n);const ext=logsHoy.filter(l=>l.t==='e');const rcs=logsHoy.filter(l=>l.t==='r');const ocu=fij.length-fN.length+ext.length+rcs.length,lib=db.cupoMax-ocu;
+    const fij=db.alumnos.filter(a=>a.clases.includes(curDay+' '+h));const hoy=todayKey();const logsHoy=db.logs[lid].filter(l=>l.fecha===hoy);const fN=logsHoy.filter(l=>l.t==='f').map(l=>l.n);const ext=logsHoy.filter(l=>l.t==='e');const rcs=logsHoy.filter(l=>l.t==='r');const ocu=fij.length-fN.length+ext.length+rcs.length,lib=db.cupoMax-ocu;
     let m='<div class="modal-title">'+curDay+' '+h+'</div><div class="modal-subtitle">'+ocu+' ocupados · '+lib+' libre'+(lib!==1?'s':'')+' de '+db.cupoMax+'</div>';
     if(fij.length){m+='<div class="section-title" style="margin-top:8px">FIJOS</div>';fij.forEach(a=>{const isF=fN.includes(a.nombre);m+='<div class="asist-item"><span class="asist-name '+(isF?'falta':'')+'">'+a.nombre+'</span><button class="btn '+(isF?'btn-green':'btn-red')+' btn-sm" onclick="toggleFalta(\''+a.nombre+'\')">'+(isF?'ASISTE':'FALTA')+'</button></div>';});}
-    if(ext.length){m+='<div class="section-title">CLASES SUELTAS</div>';ext.forEach((e,i)=>{m+='<div class="asist-item"><span class="asist-name">'+e.n+' <span class="extra-badge">'+(e.paid?'$'+e.paid.toLocaleString('es-AR'):'EXTRA')+'</span></span><button class="btn btn-red btn-sm" onclick="removeExtra('+i+')">QUITAR</button></div>';});}
+    if(ext.length){m+='<div class="section-title">CLASES SUELTAS</div>';ext.forEach((e,i)=>{
+        const cobrada=e.cobrado;
+        if(cobrada){
+            m+='<div class="asist-item"><span class="asist-name">'+e.n+' <span class="extra-badge">$'+e.paid.toLocaleString('es-AR')+'</span></span><button class="btn btn-red btn-sm" onclick="removeExtra('+i+')">QUITAR</button></div>';
+        }else{
+            m+='<div class="asist-item"><span class="asist-name">'+e.n+' <span class="extra-badge" style="background:var(--red-dim);color:var(--red)">PENDIENTE</span></span><div style="display:flex;gap:6px"><button class="btn btn-green btn-sm" onclick="cobrarSuelta('+i+')">COBRAR</button><button class="btn btn-red btn-sm" onclick="removeExtra('+i+')">QUITAR</button></div></div>';
+        }
+    });}
     if(rcs.length){m+='<div class="section-title">RECUPEROS</div>';rcs.forEach((r,i)=>{m+='<div class="asist-item"><span class="asist-name">'+r.n+' <span class="recup-badge">RECUPERO</span></span><button class="btn btn-red btn-sm" onclick="removeRecupero('+i+')">QUITAR</button></div>';});}
     if(lib>0){const pr=db.precioClaseSuelta||0;m+='<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)"><div class="section-title" style="margin-top:0">OCUPAR CUPO</div><div class="medio-toggle" style="margin-bottom:10px"><button class="medio-opt active" id="tipo-suelta" onclick="setTipoCupo(\'suelta\')">CLASE SUELTA'+(pr?' $'+pr.toLocaleString('es-AR'):'')+'</button><button class="medio-opt" id="tipo-recup" onclick="setTipoCupo(\'recupero\')">RECUPERO</button></div><select class="form-select" id="modal-sel" onchange="document.getElementById(\'modal-vis\').style.display=this.value===\'__VIS__\'?\'block\':\'none\'"><option value="">Seleccionar...</option><option value="__VIS__">VISITANTE</option>'+db.alumnos.filter(a=>!a.clases.includes(curDay+' '+h)).map(a=>'<option value="'+a.nombre+'">'+a.nombre+'</option>').join('')+'</select><input class="form-input" id="modal-vis" placeholder="Nombre visitante..." style="display:none;margin-top:8px"><button class="btn btn-accent btn-full" onclick="addCupo()">AÑADIR A CLASE</button></div>';}
     else{m+='<div style="margin-top:16px;padding:16px;background:var(--red-dim);border-radius:var(--radius-sm);text-align:center"><span style="color:var(--red);font-weight:700;font-size:.85em">CLASE COMPLETA</span></div>';}
@@ -439,23 +459,41 @@ function addCupo(){
         db.logs[lid].push({n:nom,t:'r',fecha:todayKey()});
     }else{
         const pr=db.precioClaseSuelta||0;
-        const fechaHoy=new Date().toISOString().slice(0,10);
-        db.logs[lid].push({n:nom,t:'e',paid:pr,fecha:fechaHoy});
-        // Siempre registrar en clasesSueltas, incluso si el precio es 0
-        db.clasesSueltas.push({nombre:nom,fecha:fechaHoy,monto:pr,dia:curDay,hora:curHora});
+        // Solo agenda, NO cobra. paid guarda el precio de referencia, cobrado=false
+        db.logs[lid].push({n:nom,t:'e',paid:pr,fecha:todayKey(),cobrado:false});
     }
     tipoCupo='suelta';
     save();openClaseModal(curHora);renderClases();
+}
+
+function cobrarSuelta(i){
+    const lid=curDay+'_'+curHora;const hoy=todayKey();
+    const exts=db.logs[lid].filter(l=>l.t==='e'&&l.fecha===hoy);
+    const e=exts[i];
+    const pr=e.paid||db.precioClaseSuelta||0;
+    const monto=prompt('Monto a cobrar:',pr);
+    if(monto===null)return;
+    const m=parseInt(monto);
+    if(isNaN(m)||m<0)return alert('Monto inválido');
+    // Marcar como cobrado en el log
+    e.cobrado=true;
+    e.paid=m;
+    // Registrar en clasesSueltas para el balance
+    db.clasesSueltas.push({nombre:e.n,fecha:hoy,monto:m,dia:curDay,hora:curHora});
+    save();openClaseModal(curHora);renderClases();renderPagos();updateHomeSubs();
 }
 
 function removeExtra(i){
     const lid=curDay+'_'+curHora;const hoy=todayKey();
     const exts=db.logs[lid].filter(l=>l.t==='e'&&l.fecha===hoy);
     const t=exts[i];
-    const ci=db.clasesSueltas.findIndex(cs=>cs.nombre===t.n&&cs.dia===curDay&&cs.hora===curHora&&cs.fecha===t.fecha);
-    if(ci>-1)db.clasesSueltas.splice(ci,1);
+    // Si estaba cobrada, quitar del balance
+    if(t.cobrado){
+        const ci=db.clasesSueltas.findIndex(cs=>cs.nombre===t.n&&cs.dia===curDay&&cs.hora===curHora&&cs.fecha===t.fecha);
+        if(ci>-1)db.clasesSueltas.splice(ci,1);
+    }
     db.logs[lid].splice(db.logs[lid].indexOf(t),1);
-    save();openClaseModal(curHora);renderClases();
+    save();openClaseModal(curHora);renderClases();renderPagos();updateHomeSubs();
 }
 function removeRecupero(i){const lid=curDay+'_'+curHora;const hoy=todayKey();const rcs=db.logs[lid].filter(l=>l.t==='r'&&l.fecha===hoy);db.logs[lid].splice(db.logs[lid].indexOf(rcs[i]),1);save();openClaseModal(curHora);renderClases();}
 
