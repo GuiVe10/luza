@@ -7,7 +7,6 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Luza">
     <meta name="theme-color" content="#faf5f0">
-    <link rel="apple-touch-icon" href="apple-touch-icon.png">
     <title>LUZA GESTIÓN</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet">
@@ -308,7 +307,6 @@ async function loadFromServer(){
         if(!db.mesesCerrados) db.mesesCerrados=[];
         db.alumnos.forEach(a=>{if(!a.pagos)a.pagos=[];});
         curDay=db.dias[0]||"LUNES";
-        checkMonthClose();
         renderAll();
         updateHomeSubs();
         document.getElementById('loading-overlay').classList.add('hidden');
@@ -356,22 +354,34 @@ function mesActualKey(){return new Date().toISOString().slice(0,7);}
 function todayKey(){return new Date().toISOString().slice(0,10);}
 function mesNombre(mk){const p=mk.split('-');return MESES[parseInt(p[1])-1]+' '+p[0];}
 
-function checkMonthClose(){
-    const hoy=mesActualKey();const cerr=new Set(db.mesesCerrados.map(m=>m.mes));
-    let ear=hoy;
-    db.alumnos.forEach(a=>(a.pagos||[]).forEach(p=>{if(p.fecha&&p.fecha.slice(0,7)<ear)ear=p.fecha.slice(0,7);}));
-    db.clasesSueltas.forEach(cs=>{if(cs.fecha&&cs.fecha.slice(0,7)<ear)ear=cs.fecha.slice(0,7);});
-    let cur=ear;
-    while(cur<hoy){if(!cerr.has(cur))closeMonth(cur);let pts=cur.split('-').map(Number);pts[1]++;if(pts[1]>12){pts[1]=1;pts[0]++;}cur=pts[0]+'-'+String(pts[1]).padStart(2,'0');}
-}
-
-function closeMonth(mk){
-    let tE=0,tC=0,det=[];
-    db.alumnos.forEach(a=>{const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);tE+=pr;tC+=pg;det.push({nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});});
-    const sl=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk));const tS=sl.reduce((s,cs)=>s+cs.monto,0);tC+=tS;
-    const deu=det.filter(d=>d.pagado<d.precio).map(d=>({nombre:d.nombre,debe:d.precio-d.pagado}));
-    db.mesesCerrados.push({mes:mk,totalEsperado:tE,totalCobrado:tC,totalSueltas:tS,deudores:deu,detalle:det});
-    db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));save();
+function cerrarMesManual(){
+    const mk=mesActualKey();
+    // No se puede cerrar el mes actual, solo meses pasados
+    // Buscar el mes anterior
+    let pts=mk.split('-').map(Number);pts[1]--;if(pts[1]<1){pts[1]=12;pts[0]--;}
+    const mesPrev=pts[0]+'-'+String(pts[1]).padStart(2,'0');
+    // Verificar si ya está cerrado
+    if(db.mesesCerrados.find(m=>m.mes===mesPrev)){alert(mesNombre(mesPrev)+' ya está cerrado.');return;}
+    if(!confirm('¿Cerrar '+mesNombre(mesPrev)+'?'))return;
+    // Contar alumnos que tenían pagos en ese mes
+    let nAlumnos=0;
+    db.alumnos.forEach(a=>{
+        const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesPrev));
+        if(pg.length>0)nAlumnos++;
+    });
+    // También contar alumnos actuales que no pagaron pero estaban activos (tienen plan)
+    // Usar el total de alumnos actuales como referencia
+    nAlumnos=Math.max(nAlumnos,db.alumnos.length);
+    // Clases sueltas del mes
+    const sl=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mesPrev));
+    const nSueltas=sl.length;
+    // Total cobrado: pagos de alumnos + sueltas
+    let totalCobrado=0;
+    db.alumnos.forEach(a=>{totalCobrado+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesPrev)).reduce((s,p)=>s+p.monto,0);});
+    totalCobrado+=sl.reduce((s,cs)=>s+cs.monto,0);
+    db.mesesCerrados.push({mes:mesPrev,alumnos:nAlumnos,sueltas:nSueltas,totalCobrado:totalCobrado});
+    db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));
+    save();renderPagos();
 }
 
 function updateDate(){document.getElementById('header-date').textContent=new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'});}
@@ -406,22 +416,73 @@ function renderAlumnos(){
 }
 
 function renderPagos(){
-    const mk=mesActualKey();let tE=0,tC=0,ap=[];
-    db.alumnos.forEach(a=>{const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);tE+=pr;tC+=pg;ap.push({id:a.id,nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});});
-    const slM=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk));const tS=slM.reduce((s,cs)=>s+cs.monto,0);const tF=tC+tS,pC=Math.max(0,tE-tC);
-    let tEf=0,tTr=0;db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
-    // Las clases sueltas siempre suman a efectivo (se cobran en el momento)
+    const mk=mesActualKey();
+    // === BILLETERA: lo que ya se cobró este mes (histórico, no cambia si borrás alumno) ===
+    let tC=0;
+    db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);});
+    const slM=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk));
+    const tS=slM.reduce((s,cs)=>s+cs.monto,0);
+    const billetera=tC+tS;
+
+    // === PROYECCIÓN: cuánto esperás cobrar (dinámico, cambia con altas/bajas) ===
+    let proyeccion=0;
+    const ap=[];
+    db.alumnos.forEach(a=>{
+        const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;
+        const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);
+        proyeccion+=pr;
+        ap.push({id:a.id,nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});
+    });
+    const porCobrar=Math.max(0,proyeccion-tC);
+
+    // === DEUDA ATRASADA: meses anteriores no pagos completos ===
+    let deudaAtrasada=0;
+    const mesesPrev=[];
+    // Buscar todos los meses con pagos anteriores al actual
+    const mesesConPagos=new Set();
+    db.alumnos.forEach(a=>{(a.pagos||[]).forEach(p=>{if(p.fecha&&p.fecha.slice(0,7)<mk)mesesConPagos.add(p.fecha.slice(0,7));});});
+    db.clasesSueltas.forEach(cs=>{if(cs.fecha&&cs.fecha.slice(0,7)<mk)mesesConPagos.add(cs.fecha.slice(0,7));});
+    // Para cada mes anterior, calcular deuda de alumnos actuales
+    mesesConPagos.forEach(mesP=>{
+        db.alumnos.forEach(a=>{
+            const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;
+            const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesP)).reduce((s,p)=>s+p.monto,0);
+            if(pg<pr)deudaAtrasada+=(pr-pg);
+        });
+    });
+
+    // === EFECTIVO / TRANSFERENCIA ===
+    let tEf=0,tTr=0;
+    db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
     tEf+=tS;
-    let h='<div class="section-title" style="margin-top:0">'+mesNombre(mk).toUpperCase()+'</div><div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+tF.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(pC>0?'var(--red)':'var(--green)')+'">$'+pC.toLocaleString('es-AR')+'</div></div></div>';
+
+    // === RENDER ===
+    let h='<div class="section-title" style="margin-top:0">'+mesNombre(mk).toUpperCase()+'</div>';
+    // Billetera y Por cobrar
+    h+='<div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+billetera.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(porCobrar>0?'var(--red)':'var(--green)')+'">$'+porCobrar.toLocaleString('es-AR')+'</div></div></div>';
+    // Deuda atrasada
+    if(deudaAtrasada>0){
+        h+='<div class="card" style="margin-bottom:12px;background:var(--red-dim);border-color:var(--red)"><div class="flex-between"><div style="font-size:.8em;font-weight:700;color:var(--red)">DEUDA ATRASADA (meses anteriores)</div><div style="font-weight:700;color:var(--red)">$'+deudaAtrasada.toLocaleString('es-AR')+'</div></div></div>';
+    }
+    // Efectivo / Transferencia
     h+='<div class="card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-around;text-align:center"><div><div style="font-size:.65em;font-weight:700;color:var(--yellow);letter-spacing:1px">EFECTIVO</div><div style="font-size:1.1em;font-weight:700">$'+tEf.toLocaleString('es-AR')+'</div></div><div style="width:1px;background:var(--border)"></div><div><div style="font-size:.65em;font-weight:700;color:var(--accent);letter-spacing:1px">TRANSFERENCIA</div><div style="font-size:1.1em;font-weight:700">$'+tTr.toLocaleString('es-AR')+'</div></div></div></div>';
-    if(slM.length>0)h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div>';
-    // Detalle de cada clase suelta del mes
-    if(slM.length>0){slM.forEach(cs=>{h+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:.78em"><span style="color:var(--text2)">'+cs.nombre+' · '+cs.dia+' '+cs.hora+'</span><span style="font-weight:600">$'+cs.monto.toLocaleString('es-AR')+'</span></div>';});h+='</div>';}
+    // Clases sueltas del mes
+    if(slM.length>0){
+        h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div>';
+        slM.forEach(cs=>{h+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:.78em"><span style="color:var(--text2)">'+cs.nombre+' · '+cs.dia+' '+cs.hora+'</span><span style="font-weight:600">$'+cs.monto.toLocaleString('es-AR')+'</span></div>';});
+        h+='</div>';
+    }
+    // Alumnos
     h+='<div class="section-title">ALUMNOS</div>';
     ap.forEach(a=>{const d=a.precio-a.pagado;h+='<div class="pago-alumno-row" onclick="openPagoForm(\''+a.id+'\')"><div><div style="font-weight:600;font-size:.9em">'+a.nombre+'</div><div style="font-size:.7em;color:var(--text2)">'+a.plan+' · $'+a.precio.toLocaleString('es-AR')+'</div></div><div style="text-align:right"><div style="font-weight:700;font-size:.85em;color:'+(d>0?'var(--red)':'var(--green)')+'">'+(d>0?'Debe $'+d.toLocaleString('es-AR'):'AL DÍA')+'</div><div style="font-size:.65em;color:var(--text2)">Pagó $'+a.pagado.toLocaleString('es-AR')+'</div></div></div>';});
+    // Botón cerrar mes anterior
+    h+='<button class="btn btn-ghost btn-full" style="margin-top:16px" onclick="cerrarMesManual()">CERRAR MES ANTERIOR</button>';
+    // Meses anteriores (simplificado)
     if(db.mesesCerrados.length){
         h+='<div class="section-title" style="margin-top:24px">MESES ANTERIORES</div>';
-        db.mesesCerrados.forEach((mc,i)=>{const nd=mc.deudores?mc.deudores.length:0;h+='<div class="accordion-header" onclick="toggleAccordion('+i+')"><div><div style="font-weight:600;font-size:.9em">'+mesNombre(mc.mes)+'</div><div style="font-size:.7em;color:var(--text2)">Cobrado $'+mc.totalCobrado.toLocaleString('es-AR')+' de $'+mc.totalEsperado.toLocaleString('es-AR')+(mc.totalSueltas?' + $'+mc.totalSueltas.toLocaleString('es-AR')+' sueltas':'')+'</div></div><span class="accordion-arrow" id="arrow-'+i+'">▼</span></div><div class="accordion-body" id="accordion-'+i+'">';if(nd>0){h+='<div style="padding:8px 12px;background:var(--red-dim);border-radius:var(--radius-sm);margin-bottom:8px"><div style="font-size:.75em;font-weight:700;color:var(--red);margin-bottom:4px">'+nd+' DEUDOR'+(nd>1?'ES':'')+'</div>';mc.deudores.forEach(d=>{h+='<div style="font-size:.8em;padding:3px 0">'+d.nombre+': <b style="color:var(--red)">$'+d.debe.toLocaleString('es-AR')+'</b></div>';});h+='</div>';}(mc.detalle||[]).forEach(d=>{const ok=d.pagado>=d.precio;h+='<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border);font-size:.8em"><span>'+d.nombre+' <span style="color:var(--text3)">('+d.plan+')</span></span><span style="color:'+(ok?'var(--green)':'var(--red)')+'">$'+d.pagado.toLocaleString('es-AR')+' / $'+d.precio.toLocaleString('es-AR')+'</span></div>';});h+='</div>';});
+        db.mesesCerrados.forEach(mc=>{
+            h+='<div class="card" style="margin-bottom:8px"><div style="font-weight:600;font-size:.9em;margin-bottom:6px">'+mesNombre(mc.mes)+'</div><div style="display:flex;justify-content:space-between;font-size:.8em"><span style="color:var(--text2)">'+(mc.alumnos||0)+' alumnos · '+(mc.sueltas||0)+' extras</span><span style="font-weight:700;color:var(--green)">$'+(mc.totalCobrado||0).toLocaleString('es-AR')+'</span></div></div>';
+        });
     }
     document.getElementById('pagos-content').innerHTML=h;
 }
