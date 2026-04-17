@@ -264,7 +264,7 @@ const DIAS_SHORT={"LUNES":"LUN","MARTES":"MAR","MIÉRCOLES":"MIÉ","JUEVES":"JUE
 const MESES=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 const API_URL='https://script.google.com/macros/s/AKfycbyKPuUNwSwN4C2eJY1tipmz2ArStg4CyG-RweD77W8G8w3q6n4zRZ11RfBAVxKrHsyO/exec';
 
-const defaultData={planes:[{id:"p1",nombre:"Plan 1x",veces:1,precio:15000},{id:"p2",nombre:"Plan 2x",veces:2,precio:25000},{id:"p3",nombre:"Plan 3x",veces:3,precio:35000}],horarios:["16:00","18:00","20:00"],dias:["LUNES","MARTES","MIÉRCOLES","JUEVES"],cupoMax:8,precioClaseSuelta:5000,alumnos:[],logs:{},clasesSueltas:[],mesesCerrados:[]};
+const defaultData={planes:[{id:"p1",nombre:"Plan 1x",veces:1,precio:15000},{id:"p2",nombre:"Plan 2x",veces:2,precio:25000},{id:"p3",nombre:"Plan 3x",veces:3,precio:35000}],horarios:["16:00","18:00","20:00"],dias:["LUNES","MARTES","MIÉRCOLES","JUEVES"],cupoMax:8,precioClaseSuelta:5000,alumnos:[],logs:{},clasesSueltas:[],mesesCerrados:[],mesAbierto:null};
 
 let db=JSON.parse(JSON.stringify(defaultData));
 let curDay="LUNES",curHora="";
@@ -286,9 +286,9 @@ function goHome(){
 function updateHomeSubs(){
     document.getElementById('home-alumnos-sub').textContent=db.alumnos.length+' alumno'+(db.alumnos.length!==1?'s':'');
     document.getElementById('home-clases-sub').textContent=db.horarios.length+' horarios · '+db.dias.length+' días';
-    const mk=mesActualKey();
-    let tC=0;db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);});
-    const tS=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk)).reduce((s,cs)=>s+cs.monto,0);
+    const mk=db.mesAbierto;
+    let tC=0;db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);});
+    const tS=db.clasesSueltas.filter(cs=>mesDe(cs)===mk).reduce((s,cs)=>s+cs.monto,0);
     document.getElementById('home-pagos-sub').textContent='$'+(tC+tS).toLocaleString('es-AR')+' cobrado';
 }
 
@@ -306,6 +306,7 @@ async function loadFromServer(){
         if(!db.clasesSueltas) db.clasesSueltas=[];
         if(!db.mesesCerrados) db.mesesCerrados=[];
         db.alumnos.forEach(a=>{if(!a.pagos)a.pagos=[];});
+        migrarDatos();
         curDay=db.dias[0]||"LUNES";
         renderAll();
         updateHomeSubs();
@@ -354,34 +355,44 @@ function mesActualKey(){return new Date().toISOString().slice(0,7);}
 function todayKey(){return new Date().toISOString().slice(0,10);}
 function mesNombre(mk){const p=mk.split('-');return MESES[parseInt(p[1])-1]+' '+p[0];}
 
-function cerrarMesManual(){
-    const mk=mesActualKey();
-    // No se puede cerrar el mes actual, solo meses pasados
-    // Buscar el mes anterior
-    let pts=mk.split('-').map(Number);pts[1]--;if(pts[1]<1){pts[1]=12;pts[0]--;}
-    const mesPrev=pts[0]+'-'+String(pts[1]).padStart(2,'0');
-    // Verificar si ya está cerrado
-    if(db.mesesCerrados.find(m=>m.mes===mesPrev)){alert(mesNombre(mesPrev)+' ya está cerrado.');return;}
-    if(!confirm('¿Cerrar '+mesNombre(mesPrev)+'?'))return;
-    // Contar alumnos que tenían pagos en ese mes
-    let nAlumnos=0;
-    db.alumnos.forEach(a=>{
-        const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesPrev));
-        if(pg.length>0)nAlumnos++;
-    });
-    // También contar alumnos actuales que no pagaron pero estaban activos (tienen plan)
-    // Usar el total de alumnos actuales como referencia
-    nAlumnos=Math.max(nAlumnos,db.alumnos.length);
-    // Clases sueltas del mes
-    const sl=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mesPrev));
-    const nSueltas=sl.length;
-    // Total cobrado: pagos de alumnos + sueltas
-    let totalCobrado=0;
-    db.alumnos.forEach(a=>{totalCobrado+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesPrev)).reduce((s,p)=>s+p.monto,0);});
-    totalCobrado+=sl.reduce((s,cs)=>s+cs.monto,0);
-    db.mesesCerrados.push({mes:mesPrev,alumnos:nAlumnos,sueltas:nSueltas,totalCobrado:totalCobrado});
+// Mes del pago: usa p.mes si está, si no el prefijo de p.fecha (compat con datos viejos)
+function mesDe(p){return p.mes||(p.fecha?p.fecha.slice(0,7):'');}
+
+// Avanza un "YYYY-MM" al mes siguiente
+function mesSiguiente(mk){let pts=mk.split('-').map(Number);pts[1]++;if(pts[1]>12){pts[1]=1;pts[0]++;}return pts[0]+'-'+String(pts[1]).padStart(2,'0');}
+
+function migrarDatos(){
+    // 1) mesAbierto: si falta, arrancar con el mes UTC actual
+    if(!db.mesAbierto) db.mesAbierto=mesActualKey();
+    // 2) Backfill p.mes en pagos y sueltas viejas
+    db.alumnos.forEach(a=>(a.pagos||[]).forEach(p=>{if(!p.mes&&p.fecha)p.mes=p.fecha.slice(0,7);}));
+    db.clasesSueltas.forEach(cs=>{if(!cs.mes&&cs.fecha)cs.mes=cs.fecha.slice(0,7);});
+    // 3) Dedup mesesCerrados por mes (primera ocurrencia gana)
+    const seen={};db.mesesCerrados=db.mesesCerrados.filter(m=>seen[m.mes]?false:(seen[m.mes]=true));
+    // 4) Normalizar snapshot: sólo {mes, alumnos, sueltas, totalCobrado}, descartar basura heredada
+    db.mesesCerrados=db.mesesCerrados.map(m=>({mes:m.mes,alumnos:m.alumnos||0,sueltas:m.sueltas||0,totalCobrado:m.totalCobrado||0}));
     db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));
-    save();renderPagos();
+}
+
+function cerrarMesManual(){
+    const mk=db.mesAbierto;
+    // Calcular snapshot del mes abierto
+    let totalCobrado=0,nAlumnos=0;
+    db.alumnos.forEach(a=>{
+        const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);
+        if(pg>0)nAlumnos++;
+        totalCobrado+=pg;
+    });
+    const sl=db.clasesSueltas.filter(cs=>mesDe(cs)===mk);
+    const nSueltas=sl.length;
+    totalCobrado+=sl.reduce((s,cs)=>s+cs.monto,0);
+    if(!confirm('¿Cerrar '+mesNombre(mk)+'?\n\nAlumnos: '+nAlumnos+'\nSueltas: '+nSueltas+'\nTotal: $'+totalCobrado.toLocaleString('es-AR')+'\n\nSe abrirá '+mesNombre(mesSiguiente(mk))+'.'))return;
+    // Reemplazar si ya existía un snapshot del mes (evita duplicados)
+    db.mesesCerrados=db.mesesCerrados.filter(m=>m.mes!==mk);
+    db.mesesCerrados.push({mes:mk,alumnos:nAlumnos,sueltas:nSueltas,totalCobrado:totalCobrado});
+    db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));
+    db.mesAbierto=mesSiguiente(mk);
+    save();renderAll();updateHomeSubs();
 }
 
 function updateDate(){document.getElementById('header-date').textContent=new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'});}
@@ -416,68 +427,40 @@ function renderAlumnos(){
 }
 
 function renderPagos(){
-    const mk=mesActualKey();
-    // === BILLETERA: lo que ya se cobró este mes (histórico, no cambia si borrás alumno) ===
+    const mk=db.mesAbierto;
+    // === COBRADO: pagos de alumnos + sueltas del mes abierto ===
     let tC=0;
-    db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);});
-    const slM=db.clasesSueltas.filter(cs=>cs.fecha&&cs.fecha.startsWith(mk));
-    const tS=slM.reduce((s,cs)=>s+cs.monto,0);
-    const billetera=tC+tS;
-
-    // === PROYECCIÓN: cuánto esperás cobrar (dinámico, cambia con altas/bajas) ===
-    let proyeccion=0;
     const ap=[];
     db.alumnos.forEach(a=>{
         const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;
-        const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);
-        proyeccion+=pr;
+        const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);
+        tC+=pg;
         ap.push({id:a.id,nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});
     });
-    const porCobrar=Math.max(0,proyeccion-tC);
+    const slM=db.clasesSueltas.filter(cs=>mesDe(cs)===mk);
+    const tS=slM.reduce((s,cs)=>s+cs.monto,0);
+    const cobrado=tC+tS;
 
-    // === DEUDA ATRASADA: meses anteriores no pagos completos ===
-    let deudaAtrasada=0;
-    const mesesPrev=[];
-    // Buscar todos los meses con pagos anteriores al actual
-    const mesesConPagos=new Set();
-    db.alumnos.forEach(a=>{(a.pagos||[]).forEach(p=>{if(p.fecha&&p.fecha.slice(0,7)<mk)mesesConPagos.add(p.fecha.slice(0,7));});});
-    db.clasesSueltas.forEach(cs=>{if(cs.fecha&&cs.fecha.slice(0,7)<mk)mesesConPagos.add(cs.fecha.slice(0,7));});
-    // Para cada mes anterior, calcular deuda de alumnos actuales
-    mesesConPagos.forEach(mesP=>{
-        db.alumnos.forEach(a=>{
-            const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;
-            const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mesP)).reduce((s,p)=>s+p.monto,0);
-            if(pg<pr)deudaAtrasada+=(pr-pg);
-        });
-    });
+    // === POR COBRAR: suma de deudas individuales (no neto) ===
+    const porCobrar=ap.reduce((s,a)=>s+Math.max(0,a.precio-a.pagado),0);
 
     // === EFECTIVO / TRANSFERENCIA ===
     let tEf=0,tTr=0;
-    db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
-    tEf+=tS;
+    db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>mesDe(p)===mk).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
+    tEf+=tS; // sueltas siempre efectivo
 
     // === RENDER ===
     let h='<div class="section-title" style="margin-top:0">'+mesNombre(mk).toUpperCase()+'</div>';
-    // Billetera y Por cobrar
-    h+='<div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+billetera.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(porCobrar>0?'var(--red)':'var(--green)')+'">$'+porCobrar.toLocaleString('es-AR')+'</div></div></div>';
-    // Deuda atrasada
-    if(deudaAtrasada>0){
-        h+='<div class="card" style="margin-bottom:12px;background:var(--red-dim);border-color:var(--red)"><div class="flex-between"><div style="font-size:.8em;font-weight:700;color:var(--red)">DEUDA ATRASADA (meses anteriores)</div><div style="font-weight:700;color:var(--red)">$'+deudaAtrasada.toLocaleString('es-AR')+'</div></div></div>';
-    }
-    // Efectivo / Transferencia
+    h+='<div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+cobrado.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(porCobrar>0?'var(--red)':'var(--green)')+'">$'+porCobrar.toLocaleString('es-AR')+'</div></div></div>';
     h+='<div class="card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-around;text-align:center"><div><div style="font-size:.65em;font-weight:700;color:var(--yellow);letter-spacing:1px">EFECTIVO</div><div style="font-size:1.1em;font-weight:700">$'+tEf.toLocaleString('es-AR')+'</div></div><div style="width:1px;background:var(--border)"></div><div><div style="font-size:.65em;font-weight:700;color:var(--accent);letter-spacing:1px">TRANSFERENCIA</div><div style="font-size:1.1em;font-weight:700">$'+tTr.toLocaleString('es-AR')+'</div></div></div></div>';
-    // Clases sueltas del mes
     if(slM.length>0){
         h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div>';
         slM.forEach(cs=>{h+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:.78em"><span style="color:var(--text2)">'+cs.nombre+' · '+cs.dia+' '+cs.hora+'</span><span style="font-weight:600">$'+cs.monto.toLocaleString('es-AR')+'</span></div>';});
         h+='</div>';
     }
-    // Alumnos
     h+='<div class="section-title">ALUMNOS</div>';
     ap.forEach(a=>{const d=a.precio-a.pagado;h+='<div class="pago-alumno-row" onclick="openPagoForm(\''+a.id+'\')"><div><div style="font-weight:600;font-size:.9em">'+a.nombre+'</div><div style="font-size:.7em;color:var(--text2)">'+a.plan+' · $'+a.precio.toLocaleString('es-AR')+'</div></div><div style="text-align:right"><div style="font-weight:700;font-size:.85em;color:'+(d>0?'var(--red)':'var(--green)')+'">'+(d>0?'Debe $'+d.toLocaleString('es-AR'):'AL DÍA')+'</div><div style="font-size:.65em;color:var(--text2)">Pagó $'+a.pagado.toLocaleString('es-AR')+'</div></div></div>';});
-    // Botón cerrar mes anterior
-    h+='<button class="btn btn-ghost btn-full" style="margin-top:16px" onclick="cerrarMesManual()">CERRAR MES ANTERIOR</button>';
-    // Meses anteriores (simplificado)
+    h+='<button class="btn btn-accent btn-full" style="margin-top:16px" onclick="cerrarMesManual()">CERRAR '+mesNombre(mk).toUpperCase()+'</button>';
     if(db.mesesCerrados.length){
         h+='<div class="section-title" style="margin-top:24px">MESES ANTERIORES</div>';
         db.mesesCerrados.forEach(mc=>{
@@ -541,7 +524,7 @@ function cobrarSuelta(i){
     e.cobrado=true;
     e.paid=m;
     // Registrar en clasesSueltas para el balance
-    db.clasesSueltas.push({nombre:e.n,fecha:hoy,monto:m,dia:curDay,hora:curHora});
+    db.clasesSueltas.push({nombre:e.n,fecha:hoy,mes:db.mesAbierto,monto:m,dia:curDay,hora:curHora});
     save();openClaseModal(curHora);renderClases();renderPagos();updateHomeSubs();
 }
 
@@ -573,7 +556,7 @@ function deleteAlumno(id){if(!confirm('¿Eliminar?'))return;db.alumnos=db.alumno
 function openAlumnoDetail(id){const a=db.alumnos.find(x=>x.id===id),pl=db.planes.find(p=>p.id===a.planId);let m='<div class="modal-title">'+a.nombre+'</div><div class="modal-subtitle">'+(pl?pl.nombre:'Sin plan')+' · '+a.clases.length+' clase'+(a.clases.length!==1?'s':'')+'/sem</div><div class="section-title" style="margin-top:8px">CLASES ASIGNADAS</div>';a.clases.forEach(c=>{m+='<div style="padding:10px 0;border-bottom:1px solid var(--border);font-size:.9em">'+c+'</div>';});m+='<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-accent" style="flex:1" onclick="openAlumnoForm(\''+a.id+'\')">EDITAR</button><button class="btn btn-ghost" style="flex:1" onclick="openPagoForm(\''+a.id+'\')">PAGOS</button></div>';showModal(m);}
 
 function openPagoForm(aId){
-    const a=db.alumnos.find(x=>x.id===aId),pl=db.planes.find(p=>p.id===a.planId);const mk=mesActualKey();const pg=(a.pagos||[]).filter(p=>p.fecha&&p.fecha.startsWith(mk)).reduce((s,p)=>s+p.monto,0);const pr=pl?pl.precio:0,de=Math.max(0,pr-pg);
+    const a=db.alumnos.find(x=>x.id===aId),pl=db.planes.find(p=>p.id===a.planId);const mk=db.mesAbierto;const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);const pr=pl?pl.precio:0,de=Math.max(0,pr-pg);
     let m='<div class="modal-title">'+a.nombre+'</div><div class="modal-subtitle">'+(pl?pl.nombre:'—')+' · $'+pr.toLocaleString('es-AR')+'/mes</div><div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">PAGADO</div><div class="pago-sum-value" style="color:var(--green)">$'+pg.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">DEBE</div><div class="pago-sum-value" style="color:'+(de>0?'var(--red)':'var(--green)')+'">$'+de.toLocaleString('es-AR')+'</div></div></div>';
     m+='<div class="form-group"><label class="form-label">REGISTRAR PAGO</label><input class="form-input" id="frm-pago" type="number" placeholder="Monto..." value="'+(de>0?de:pr)+'"></div><div class="form-group"><label class="form-label">MEDIO DE PAGO</label><div class="medio-toggle"><button class="medio-opt active" id="medio-ef" onclick="setMedioPago(\'efectivo\')">EFECTIVO</button><button class="medio-opt" id="medio-tr" onclick="setMedioPago(\'transferencia\')">TRANSF.</button></div></div><button class="btn btn-accent btn-full" onclick="registrarPago(\''+a.id+'\')">REGISTRAR PAGO</button>';
     const pagos=[...(a.pagos||[])].sort((a,b)=>b.fecha.localeCompare(a.fecha));
@@ -582,7 +565,614 @@ function openPagoForm(aId){
 }
 let medioPagoSel='efectivo';
 function setMedioPago(m){medioPagoSel=m;document.getElementById('medio-ef').classList.toggle('active',m==='efectivo');document.getElementById('medio-tr').classList.toggle('active',m==='transferencia');}
-function registrarPago(aId){const mt=parseInt(document.getElementById('frm-pago').value);if(!mt||mt<=0)return;db.alumnos.find(x=>x.id===aId).pagos.push({monto:mt,fecha:new Date().toISOString().slice(0,10),medio:medioPagoSel});medioPagoSel='efectivo';save();openPagoForm(aId);renderPagos();updateHomeSubs();}
+function registrarPago(aId){const mt=parseInt(document.getElementById('frm-pago').value);if(!mt||mt<=0)return;db.alumnos.find(x=>x.id===aId).pagos.push({monto:mt,fecha:new Date().toISOString().slice(0,10),mes:db.mesAbierto,medio:medioPagoSel});medioPagoSel='efectivo';save();openPagoForm(aId);renderPagos();updateHomeSubs();}
+function deletePago(aId,idx){if(!confirm('¿Eliminar pago?'))return;const a=db.alumnos.find(x=>x.id===aId);const s=[...a.pagos].sort((a,b)=>b.fecha.localeCompare(a.fecha));a.pagos.splice(a.pagos.indexOf(s[idx]),1);save();openPagoForm(aId);renderPagos();updateHomeSubs();}
+
+function renderConfig(){
+    document.getElementById('config-dias').innerHTML=DIAS_REF.map(d=>'<div class="config-item"><span style="font-weight:500;font-size:.9em">'+d+'</span><div class="toggle '+(db.dias.includes(d)?'on':'')+'" onclick="toggleDia(\''+d+'\')"></div></div>').join('');
+    document.getElementById('cupo-display').textContent=db.cupoMax+' personas';
+    document.getElementById('config-clase-suelta').value=db.precioClaseSuelta||0;
+    document.getElementById('config-horarios').innerHTML=db.horarios.sort().map(h=>'<div class="config-item"><span style="font-weight:600">'+h+'</span><button class="btn btn-red btn-sm" onclick="removeHorario(\''+h+'\')">QUITAR</button></div>').join('')||'<p style="color:var(--text3);font-size:.85em">Sin horarios</p>';
+    document.getElementById('config-planes').innerHTML=db.planes.map(p=>'<div class="config-item"><div><div style="font-weight:600;font-size:.9em">'+p.nombre+'</div><div style="font-size:.75em;color:var(--text2)">'+p.veces+'x/sem · $'+p.precio.toLocaleString('es-AR')+'</div></div><button class="btn btn-red btn-sm" onclick="removePlan(\''+p.id+'\')">QUITAR</button></div>').join('')||'<p style="color:var(--text3);font-size:.85em">Sin planes</p>';
+}
+function toggleDia(d){if(db.dias.includes(d))db.dias=db.dias.filter(x=>x!==d);else db.dias.push(d);db.dias.sort((a,b)=>DIAS_REF.indexOf(a)-DIAS_REF.indexOf(b));if(!db.dias.includes(curDay)&&db.dias.length)curDay=db.dias[0];save();renderAll();}
+function changeCupo(delta){db.cupoMax=Math.max(1,Math.min(20,db.cupoMax+delta));save();renderAll();}
+
+function openAddHorario(){showModal('<div class="modal-title">Nuevo Horario</div><div class="form-group"><label class="form-label">HORA</label><input class="form-input" id="frm-hora" type="time" value="17:00"></div><button class="btn btn-accent btn-full" onclick="addHorario()">AGREGAR</button>');}
+function addHorario(){const h=document.getElementById('frm-hora').value;if(!h)return;const f=h.slice(0,5);if(!db.horarios.includes(f)){db.horarios.push(f);save();}closeModalDirect();renderAll();}
+function removeHorario(h){if(!confirm('¿Quitar '+h+'?'))return;db.horarios=db.horarios.filter(x=>x!==h);save();renderAll();}
+
+function openAddPlan(){showModal('<div class="modal-title">Nuevo Plan</div><div class="form-group"><label class="form-label">NOMBRE</label><input class="form-input" id="fp-n" placeholder="Ej: Plan 4x"></div><div class="form-group"><label class="form-label">VECES POR SEMANA</label><input class="form-input" id="fp-v" type="number" min="1" max="7" value="1"></div><div class="form-group"><label class="form-label">PRECIO MENSUAL</label><input class="form-input" id="fp-p" type="number" placeholder="45000"></div><button class="btn btn-accent btn-full" onclick="addPlan()">CREAR PLAN</button>');}
+function addPlan(){const n=document.getElementById('fp-n').value.trim(),v=parseInt(document.getElementById('fp-v').value),p=parseInt(document.getElementById('fp-p').value);if(!n||!v||!p)return alert('Completá todos');db.planes.push({id:'p'+Date.now(),nombre:n,veces:v,precio:p});save();closeModalDirect();renderAll();}
+function removePlan(id){if(!confirm('¿Quitar plan?'))return;db.planes=db.planes.filter(p=>p.id!==id);save();renderAll();}
+
+function showModal(c){document.getElementById('modal-content').innerHTML=c;document.getElementById('modal-overlay').classList.add('active');document.body.style.overflow='hidden';}
+function closeModal(e){if(e.target===document.getElementById('modal-overlay'))closeModalDirect();}
+function closeModalDirect(){document.getElementById('modal-overlay').classList.remove('active');document.body.style.overflow='';}
+
+updateDate();
+loadFromServer();
+
+// Auto-refresh cada 3 minutos
+setInterval(function(){
+    loadFromServer();
+},180000);
+
+// Refresh cuando vuelve del segundo plano
+document.addEventListener('visibilitychange',function(){
+    if(!document.hidden) loadFromServer();
+});
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Luza">
+    <meta name="theme-color" content="#faf5f0">
+    <title>LUZA GESTIÓN</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #faf5f0; --bg2: #ffffff; --bg3: #f0e8df;
+            --surface: #ffffff; --surface2: #f5ede4;
+            --accent: #d4722a; --accent2: #bf5f1a; --accent-glow: rgba(212,114,42,0.12);
+            --green: #2d8a54; --green-dim: rgba(45,138,84,0.1);
+            --red: #c0392b; --red-dim: rgba(192,57,43,0.08);
+            --yellow: #d4722a; --yellow-dim: rgba(212,114,42,0.1);
+            --text: #2c1810; --text2: #7a6455; --text3: #b5a08a;
+            --border: rgba(44,24,16,0.08);
+            --radius: 16px; --radius-sm: 10px;
+            --safe-top: env(safe-area-inset-top); --safe-bottom: env(safe-area-inset-bottom);
+        }
+        *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+        html{height:-webkit-fill-available}
+        body{font-family:'DM Sans',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;min-height:-webkit-fill-available;overflow-x:hidden;padding-top:var(--safe-top);padding-bottom:var(--safe-bottom);-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
+
+        #loading-overlay{position:fixed;inset:0;background:var(--bg);z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
+        #loading-overlay .brand{font-family:'Playfair Display',serif;font-size:2em;font-weight:800;color:var(--accent)}
+        .spinner{width:32px;height:32px;border:3px solid var(--bg3);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #loading-overlay .status{font-size:.8em;color:var(--text2)}
+        #loading-overlay.hidden{display:none}
+
+        #save-indicator{position:fixed;top:calc(12px + var(--safe-top));right:16px;z-index:60;font-size:.65em;font-weight:700;padding:4px 10px;border-radius:20px;opacity:0;transition:opacity .3s;pointer-events:none}
+        #save-indicator.saving{opacity:1;background:var(--yellow-dim);color:var(--accent)}
+        #save-indicator.saved{opacity:1;background:var(--green-dim);color:var(--green)}
+        #save-indicator.error{opacity:1;background:var(--red-dim);color:var(--red)}
+
+        /* HEADER */
+        .header{padding:16px 20px 8px;display:flex;align-items:center;justify-content:space-between}
+        .header-brand{font-family:'Playfair Display',serif;font-size:1.6em;font-weight:800;letter-spacing:2px;background:linear-gradient(135deg,#d4722a,#e8944a);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .header-date{font-size:.75em;color:var(--text2);font-weight:500}
+
+        /* BACK BUTTON */
+        .back-btn{display:inline-flex;align-items:center;gap:6px;padding:10px 0;margin-bottom:8px;color:var(--accent);font-weight:700;font-size:.85em;cursor:pointer;border:none;background:none;font-family:'DM Sans',sans-serif}
+        .back-btn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+
+        /* HOME GRID - 4 big tiles */
+        .home-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px;height:calc(100dvh - 100px - var(--safe-top) - var(--safe-bottom))}
+        .home-tile{background:var(--surface);border:1px solid var(--border);border-radius:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;cursor:pointer;transition:all .15s;box-shadow:0 2px 12px rgba(44,24,16,.06)}
+        .home-tile:active{transform:scale(.96);background:var(--surface2)}
+        .home-tile svg{width:40px;height:40px;stroke:var(--accent);fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+        .home-tile span{font-size:1em;font-weight:700;color:var(--text);letter-spacing:.5px}
+        .home-tile .tile-sub{font-size:.7em;font-weight:500;color:var(--text2);margin-top:-8px}
+
+        /* VIEWS */
+        .view{display:none;padding:0 16px 20px;animation:fadeUp .25s ease;min-height:calc(100dvh - 80px - var(--safe-top))}
+        .view.active{display:block}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+        /* DAY SELECTOR - big cards */
+        .day-selector{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 0 16px}
+        .day-btn{padding:24px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text2);font-family:'DM Sans',sans-serif;font-size:1em;font-weight:700;letter-spacing:.5px;text-align:center;cursor:pointer;transition:all .2s;box-shadow:0 2px 8px rgba(44,24,16,.05)}
+        .day-btn:active{transform:scale(.96)}
+        .day-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 4px 20px rgba(212,114,42,.3)}
+
+        /* CLASE CARDS - large */
+        .clase-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px 20px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all .15s;overflow:hidden;box-shadow:0 2px 8px rgba(44,24,16,.05)}
+        .clase-card:active{transform:scale(.97);background:var(--surface2)}
+        .clase-hora{font-size:1.6em;font-weight:700;letter-spacing:-.5px}
+        .clase-hora small{font-size:.45em;font-weight:500;color:var(--text2);margin-left:2px;letter-spacing:0}
+        .clase-cupos{display:flex;align-items:center;gap:10px}
+        .cupo-dots{display:flex;gap:4px}
+        .cupo-dot{width:10px;height:10px;border-radius:50%;background:var(--green);transition:background .2s}
+        .cupo-dot.taken{background:var(--text3);opacity:.3}
+        .cupo-badge{font-size:.85em;font-weight:700;padding:8px 14px;border-radius:20px;min-width:65px;text-align:center}
+        .cupo-badge.ok{background:var(--green-dim);color:var(--green)}
+        .cupo-badge.warn{background:var(--yellow-dim);color:var(--yellow)}
+        .cupo-badge.full{background:var(--red-dim);color:var(--red)}
+
+        .section-title{font-size:.7em;font-weight:700;color:var(--text3);letter-spacing:1.5px;text-transform:uppercase;margin:20px 0 12px}
+        .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:10px;box-shadow:0 2px 8px rgba(44,24,16,.05)}
+
+        .alumno-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all .15s}
+        .alumno-card:active{transform:scale(.98)}
+        .alumno-info h3{font-size:.95em;font-weight:600;margin-bottom:4px}
+        .alumno-info .plan-tag{display:inline-block;font-size:.7em;font-weight:600;padding:3px 8px;border-radius:6px;background:var(--accent-glow);color:var(--accent)}
+        .alumno-clases{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+        .mini-tag{font-size:.62em;font-weight:600;padding:2px 6px;border-radius:4px;background:var(--bg3);color:var(--text2)}
+
+        .modal-overlay{display:none;position:fixed;inset:0;background:rgba(44,24,16,.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:100;animation:fadeIn .2s ease}
+        .modal-overlay.active{display:flex;align-items:flex-end}
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        .modal-sheet{width:100%;max-height:92dvh;background:#fff;border-radius:24px 24px 0 0;padding:12px 20px calc(20px + var(--safe-bottom));overflow-y:auto;animation:slideUp .3s cubic-bezier(.22,1,.36,1);-webkit-overflow-scrolling:touch}
+        @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+        .modal-handle{width:40px;height:4px;border-radius:2px;background:var(--text3);margin:0 auto 16px;opacity:.5}
+        .modal-title{font-family:'Playfair Display',serif;font-size:1.4em;font-weight:700;margin-bottom:4px}
+        .modal-subtitle{font-size:.8em;color:var(--text2);margin-bottom:16px}
+
+        .asist-item{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--border)}
+        .asist-item:last-child{border-bottom:none}
+        .asist-name{font-weight:600;font-size:.9em}
+        .asist-name.falta{text-decoration:line-through;color:var(--text3)}
+        .asist-name .extra-badge{font-size:.65em;font-weight:600;padding:2px 6px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);margin-left:6px}
+        .asist-name .recup-badge{font-size:.65em;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(139,92,176,.12);color:#7b52a0;margin-left:6px}
+        .medio-toggle{display:flex;gap:0;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);margin-top:4px}
+        .medio-opt{flex:1;padding:12px;text-align:center;font-size:.85em;font-weight:700;background:var(--surface);color:var(--text2);cursor:pointer;transition:all .15s;border:none;font-family:'DM Sans',sans-serif}
+        .medio-opt.active{background:var(--accent);color:#fff}
+
+        .btn{border:none;border-radius:var(--radius-sm);font-family:'DM Sans',sans-serif;font-weight:700;font-size:.85em;padding:12px 18px;cursor:pointer;transition:all .15s}
+        .btn:active{transform:scale(.95)}
+        .btn-accent{background:var(--accent);color:#fff}
+        .btn-ghost{background:var(--surface2);color:var(--text)}
+        .btn-red{background:var(--red-dim);color:var(--red)}
+        .btn-green{background:var(--green-dim);color:var(--green)}
+        .btn-full{width:100%;padding:16px;font-size:.9em;border-radius:var(--radius);margin-top:8px}
+        .btn-sm{padding:10px 16px;font-size:.8em}
+
+        .form-group{margin-bottom:12px}
+        .form-label{font-size:.75em;font-weight:700;color:var(--text2);letter-spacing:.5px;margin-bottom:6px;display:block}
+        .form-input,.form-select{width:100%;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:'DM Sans',sans-serif;font-size:16px;outline:none;transition:border-color .2s}
+        .form-input:focus,.form-select:focus{border-color:var(--accent)}
+        .form-select{-webkit-appearance:none;appearance:none}
+
+        .clase-assign-grid{display:grid;gap:8px}
+        .clase-assign-row{display:flex;gap:8px;align-items:center}
+        .clase-assign-row select{flex:1;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:'DM Sans',sans-serif;font-size:16px}
+
+        .config-item{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--border)}
+        .config-item:last-child{border-bottom:none}
+
+        .toggle{position:relative;width:46px;height:26px;background:var(--text3);border-radius:13px;cursor:pointer;transition:background .2s}
+        .toggle.on{background:var(--accent)}
+        .toggle::after{content:'';position:absolute;width:22px;height:22px;border-radius:50%;background:#fff;top:2px;left:2px;transition:transform .2s}
+        .toggle.on::after{transform:translateX(20px)}
+
+        .empty-state{text-align:center;padding:40px 20px;color:var(--text3)}
+        .empty-state p{font-size:.9em}
+
+        .pago-summary{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+        .pago-sum-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center}
+        .pago-sum-label{font-size:.65em;font-weight:700;color:var(--text2);letter-spacing:1px;margin-bottom:6px}
+        .pago-sum-value{font-size:1.4em;font-weight:700}
+
+        .pago-alumno-row{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all .15s}
+        .pago-alumno-row:active{transform:scale(.98)}
+
+        .accordion-header{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all .15s}
+        .accordion-header:active{transform:scale(.98)}
+        .accordion-body{display:none;padding:0 8px 12px}
+        .accordion-body.open{display:block;animation:fadeUp .2s ease}
+        .accordion-arrow{transition:transform .2s;font-size:.8em;color:var(--text3)}
+        .accordion-arrow.open{transform:rotate(180deg)}
+
+        ::-webkit-scrollbar{width:0}
+        .flex-between{display:flex;align-items:center;justify-content:space-between}
+        .mb-8{margin-bottom:8px}
+    </style>
+</head>
+<body>
+
+<div id="loading-overlay">
+    <div class="brand">LUZA</div>
+    <div class="spinner"></div>
+    <div class="status" id="loading-status">Conectando...</div>
+</div>
+<div id="save-indicator"></div>
+
+<div class="header">
+    <div class="header-brand">LUZA</div>
+    <div class="header-date" id="header-date"></div>
+</div>
+
+<!-- HOME -->
+<div id="v-home" class="home-grid">
+    <div class="home-tile" onclick="goTo('v-clases')">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <span>CLASES</span>
+        <div class="tile-sub" id="home-clases-sub"></div>
+    </div>
+    <div class="home-tile" onclick="goTo('v-alumnos')">
+        <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>ALUMNOS</span>
+        <div class="tile-sub" id="home-alumnos-sub"></div>
+    </div>
+    <div class="home-tile" onclick="goTo('v-pagos')">
+        <svg viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        <span>PAGOS</span>
+        <div class="tile-sub" id="home-pagos-sub"></div>
+    </div>
+    <div class="home-tile" onclick="goTo('v-config')">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>CONFIG</span>
+    </div>
+</div>
+
+<!-- CLASES -->
+<div id="v-clases" class="view">
+    <button class="back-btn" onclick="goHome()"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg> INICIO</button>
+    <div id="day-selector" class="day-selector"></div>
+    <div id="clases-list"></div>
+</div>
+
+<!-- ALUMNOS -->
+<div id="v-alumnos" class="view">
+    <button class="back-btn" onclick="goHome()"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg> INICIO</button>
+    <div class="flex-between mb-8">
+        <div class="section-title" style="margin:0">ALUMNOS</div>
+        <button class="btn btn-accent btn-sm" onclick="openAlumnoForm()">+ NUEVO</button>
+    </div>
+    <div id="alumnos-list"></div>
+</div>
+
+<!-- PAGOS -->
+<div id="v-pagos" class="view">
+    <button class="back-btn" onclick="goHome()"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg> INICIO</button>
+    <div id="pagos-content"></div>
+</div>
+
+<!-- CONFIG -->
+<div id="v-config" class="view">
+    <button class="back-btn" onclick="goHome()"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg> INICIO</button>
+    <div class="section-title">DÍAS LABORALES</div>
+    <div class="card" id="config-dias"></div>
+    <div class="section-title">CUPO MÁXIMO POR CLASE</div>
+    <div class="card"><div class="flex-between">
+        <span style="font-weight:600" id="cupo-display"></span>
+        <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="changeCupo(-1)">−</button>
+            <button class="btn btn-ghost btn-sm" onclick="changeCupo(1)">+</button>
+        </div>
+    </div></div>
+    <div class="section-title">CLASE SUELTA</div>
+    <div class="card"><div class="flex-between">
+        <div><div style="font-weight:600;font-size:.9em">Precio por clase</div><div style="font-size:.75em;color:var(--text2)">Se cobra al ocupar cupo</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--text2)">$</span>
+            <input class="form-input" id="config-clase-suelta" type="number" style="width:100px;text-align:right;padding:10px;font-size:16px" onchange="db.precioClaseSuelta=parseInt(this.value)||0;save();">
+        </div>
+    </div></div>
+    <div class="flex-between" style="margin-top:20px"><div class="section-title" style="margin:0">HORARIOS</div><button class="btn btn-accent btn-sm" onclick="openAddHorario()">+ AGREGAR</button></div>
+    <div class="card" id="config-horarios"></div>
+    <div class="flex-between" style="margin-top:20px"><div class="section-title" style="margin:0">PLANES</div><button class="btn btn-accent btn-sm" onclick="openAddPlan()">+ AGREGAR</button></div>
+    <div class="card" id="config-planes"></div>
+    <div style="margin-top:30px">
+        <button class="btn btn-ghost btn-full" onclick="loadFromServer()">RECARGAR DATOS</button>
+        <button class="btn btn-red btn-full" onclick="if(confirm('¿Resetear TODO?')){db=JSON.parse(JSON.stringify(defaultData));save();renderAll();}">RESETEAR APP</button>
+    </div>
+</div>
+
+<!-- MODAL -->
+<div id="modal-overlay" class="modal-overlay" onclick="closeModal(event)">
+    <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <div id="modal-content"></div>
+    </div>
+</div>
+
+<script>
+const DIAS_REF=["LUNES","MARTES","MIÉRCOLES","JUEVES","VIERNES","SÁBADO"];
+const DIAS_SHORT={"LUNES":"LUN","MARTES":"MAR","MIÉRCOLES":"MIÉ","JUEVES":"JUE","VIERNES":"VIE","SÁBADO":"SÁB"};
+const MESES=["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const API_URL='https://script.google.com/macros/s/AKfycbyKPuUNwSwN4C2eJY1tipmz2ArStg4CyG-RweD77W8G8w3q6n4zRZ11RfBAVxKrHsyO/exec';
+
+const defaultData={planes:[{id:"p1",nombre:"Plan 1x",veces:1,precio:15000},{id:"p2",nombre:"Plan 2x",veces:2,precio:25000},{id:"p3",nombre:"Plan 3x",veces:3,precio:35000}],horarios:["16:00","18:00","20:00"],dias:["LUNES","MARTES","MIÉRCOLES","JUEVES"],cupoMax:8,precioClaseSuelta:5000,alumnos:[],logs:{},clasesSueltas:[],mesesCerrados:[],mesAbierto:null};
+
+let db=JSON.parse(JSON.stringify(defaultData));
+let curDay="LUNES",curHora="";
+let saveTimeout=null;
+
+// === NAVIGATION ===
+function goTo(viewId){
+    document.getElementById('v-home').style.display='none';
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    document.getElementById(viewId).classList.add('active');
+    renderAll();
+}
+function goHome(){
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    document.getElementById('v-home').style.display='';
+    updateHomeSubs();
+}
+
+function updateHomeSubs(){
+    document.getElementById('home-alumnos-sub').textContent=db.alumnos.length+' alumno'+(db.alumnos.length!==1?'s':'');
+    document.getElementById('home-clases-sub').textContent=db.horarios.length+' horarios · '+db.dias.length+' días';
+    const mk=db.mesAbierto;
+    let tC=0;db.alumnos.forEach(a=>{tC+=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);});
+    const tS=db.clasesSueltas.filter(cs=>mesDe(cs)===mk).reduce((s,cs)=>s+cs.monto,0);
+    document.getElementById('home-pagos-sub').textContent='$'+(tC+tS).toLocaleString('es-AR')+' cobrado';
+}
+
+// === SERVER SYNC ===
+async function loadFromServer(){
+    if(savePending){console.log('Load bloqueado: save pendiente');return;}
+    const el=document.getElementById('loading-status');
+    if(el) el.textContent='Cargando datos...';
+    try{
+        const resp=await fetch(API_URL+'?action=loadAll');
+        const data=await resp.json();
+        if(data.error) throw new Error(data.error);
+        db=data;
+        if(!db.logs) db.logs={};
+        if(!db.clasesSueltas) db.clasesSueltas=[];
+        if(!db.mesesCerrados) db.mesesCerrados=[];
+        db.alumnos.forEach(a=>{if(!a.pagos)a.pagos=[];});
+        migrarDatos();
+        curDay=db.dias[0]||"LUNES";
+        renderAll();
+        updateHomeSubs();
+        document.getElementById('loading-overlay').classList.add('hidden');
+    }catch(err){
+        console.error('Load error:',err);
+        if(el) el.textContent='Error. Reintentando...';
+        setTimeout(loadFromServer,3000);
+    }
+}
+
+let savePending=false;
+function save(){
+    clearTimeout(saveTimeout);
+    showSaveStatus('saving','Guardando...');
+    savePending=true;
+    saveTimeout=setTimeout(async function(){
+        try{
+            const resp=await fetch(API_URL+'?action=saveAll',{
+                method:'POST',
+                headers:{'Content-Type':'text/plain'},
+                body:JSON.stringify(db),
+                redirect:'follow'
+            });
+            const result=await resp.json();
+            if(result.ok){showSaveStatus('saved','Guardado');}
+            else{showSaveStatus('error','Error');}
+        }catch(err){
+            try{
+                const resp2=await fetch(API_URL+'?action=saveAll&data='+encodeURIComponent(JSON.stringify(db)));
+                const result2=await resp2.json();
+                if(result2.ok){showSaveStatus('saved','Guardado');}
+                else{showSaveStatus('error','Error');}
+            }catch(err2){
+                console.error('Save error:',err2);
+                showSaveStatus('error','Error de red');
+            }
+        }finally{
+            savePending=false;
+        }
+    },600);
+}
+
+function showSaveStatus(type,text){const el=document.getElementById('save-indicator');el.className=type;el.textContent=text;if(type==='saved')setTimeout(function(){el.className='';},1500);}
+function mesActualKey(){return new Date().toISOString().slice(0,7);}
+function todayKey(){return new Date().toISOString().slice(0,10);}
+function mesNombre(mk){const p=mk.split('-');return MESES[parseInt(p[1])-1]+' '+p[0];}
+
+// Mes del pago: usa p.mes si está, si no el prefijo de p.fecha (compat con datos viejos)
+function mesDe(p){return p.mes||(p.fecha?p.fecha.slice(0,7):'');}
+
+// Avanza un "YYYY-MM" al mes siguiente
+function mesSiguiente(mk){let pts=mk.split('-').map(Number);pts[1]++;if(pts[1]>12){pts[1]=1;pts[0]++;}return pts[0]+'-'+String(pts[1]).padStart(2,'0');}
+
+function migrarDatos(){
+    // 1) mesAbierto: si falta, arrancar con el mes UTC actual
+    if(!db.mesAbierto) db.mesAbierto=mesActualKey();
+    // 2) Backfill p.mes en pagos y sueltas viejas
+    db.alumnos.forEach(a=>(a.pagos||[]).forEach(p=>{if(!p.mes&&p.fecha)p.mes=p.fecha.slice(0,7);}));
+    db.clasesSueltas.forEach(cs=>{if(!cs.mes&&cs.fecha)cs.mes=cs.fecha.slice(0,7);});
+    // 3) Dedup mesesCerrados por mes (primera ocurrencia gana)
+    const seen={};db.mesesCerrados=db.mesesCerrados.filter(m=>seen[m.mes]?false:(seen[m.mes]=true));
+    // 4) Normalizar snapshot: sólo {mes, alumnos, sueltas, totalCobrado}, descartar basura heredada
+    db.mesesCerrados=db.mesesCerrados.map(m=>({mes:m.mes,alumnos:m.alumnos||0,sueltas:m.sueltas||0,totalCobrado:m.totalCobrado||0}));
+    db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));
+}
+
+function cerrarMesManual(){
+    const mk=db.mesAbierto;
+    // Calcular snapshot del mes abierto
+    let totalCobrado=0,nAlumnos=0;
+    db.alumnos.forEach(a=>{
+        const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);
+        if(pg>0)nAlumnos++;
+        totalCobrado+=pg;
+    });
+    const sl=db.clasesSueltas.filter(cs=>mesDe(cs)===mk);
+    const nSueltas=sl.length;
+    totalCobrado+=sl.reduce((s,cs)=>s+cs.monto,0);
+    if(!confirm('¿Cerrar '+mesNombre(mk)+'?\n\nAlumnos: '+nAlumnos+'\nSueltas: '+nSueltas+'\nTotal: $'+totalCobrado.toLocaleString('es-AR')+'\n\nSe abrirá '+mesNombre(mesSiguiente(mk))+'.'))return;
+    // Reemplazar si ya existía un snapshot del mes (evita duplicados)
+    db.mesesCerrados=db.mesesCerrados.filter(m=>m.mes!==mk);
+    db.mesesCerrados.push({mes:mk,alumnos:nAlumnos,sueltas:nSueltas,totalCobrado:totalCobrado});
+    db.mesesCerrados.sort((a,b)=>b.mes.localeCompare(a.mes));
+    db.mesAbierto=mesSiguiente(mk);
+    save();renderAll();updateHomeSubs();
+}
+
+function updateDate(){document.getElementById('header-date').textContent=new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'});}
+
+function renderAll(){renderDays();renderClases();renderAlumnos();renderPagos();renderConfig();}
+
+function renderDays(){
+    const s=[...db.dias].sort((a,b)=>DIAS_REF.indexOf(a)-DIAS_REF.indexOf(b));
+    document.getElementById('day-selector').innerHTML=s.map(d=>'<button class="day-btn '+(curDay===d?'active':'')+'" onclick="curDay=\''+d+'\';renderDays();renderClases()">'+DIAS_SHORT[d]+'</button>').join('');
+}
+
+function renderClases(){
+    const s=[...db.horarios].sort();
+    document.getElementById('clases-list').innerHTML=s.map(h=>{
+        const lid=curDay+'_'+h;
+        const fij=db.alumnos.filter(a=>a.clases.includes(curDay+' '+h)).length;
+        const hoy=todayKey();const logsHoy=(db.logs[lid]||[]).filter(l=>l.fecha===hoy);
+        const fal=logsHoy.filter(l=>l.t==='f').length;
+        const ext=logsHoy.filter(l=>l.t==='e').length;
+        const rec=logsHoy.filter(l=>l.t==='r').length;
+        const ocu=fij-fal+ext+rec,lib=db.cupoMax-ocu;
+        const pct=lib/db.cupoMax;let sc='ok';if(pct<=0)sc='full';else if(pct<=.25)sc='warn';
+        let dots='';for(let i=0;i<db.cupoMax;i++)dots+='<div class="cupo-dot '+(i<ocu?'taken':'')+'"></div>';
+        return'<div class="clase-card" onclick="openClaseModal(\''+h+'\')"><div class="clase-hora">'+h+'<small>hs</small></div><div class="clase-cupos"><div class="cupo-dots">'+dots+'</div><div class="cupo-badge '+sc+'">'+lib+' libre'+(lib!==1?'s':'')+'</div></div></div>';
+    }).join('')||'<div class="empty-state"><p>No hay horarios configurados</p></div>';
+}
+
+function renderAlumnos(){
+    const el=document.getElementById('alumnos-list');
+    if(!db.alumnos.length){el.innerHTML='<div class="empty-state"><p>No hay alumnos</p></div>';return;}
+    el.innerHTML=db.alumnos.map(a=>{const pl=db.planes.find(p=>p.id===a.planId);return'<div class="alumno-card" onclick="openAlumnoDetail(\''+a.id+'\')"><div class="alumno-info"><h3>'+a.nombre+'</h3><span class="plan-tag">'+(pl?pl.nombre:'Sin plan')+'</span><div class="alumno-clases">'+a.clases.map(c=>'<span class="mini-tag">'+c+'</span>').join('')+'</div></div><svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--text3)" fill="none" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>';}).join('');
+}
+
+function renderPagos(){
+    const mk=db.mesAbierto;
+    // === COBRADO: pagos de alumnos + sueltas del mes abierto ===
+    let tC=0;
+    const ap=[];
+    db.alumnos.forEach(a=>{
+        const pl=db.planes.find(p=>p.id===a.planId);const pr=pl?pl.precio:0;
+        const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);
+        tC+=pg;
+        ap.push({id:a.id,nombre:a.nombre,plan:pl?pl.nombre:'—',precio:pr,pagado:pg});
+    });
+    const slM=db.clasesSueltas.filter(cs=>mesDe(cs)===mk);
+    const tS=slM.reduce((s,cs)=>s+cs.monto,0);
+    const cobrado=tC+tS;
+
+    // === POR COBRAR: suma de deudas individuales (no neto) ===
+    const porCobrar=ap.reduce((s,a)=>s+Math.max(0,a.precio-a.pagado),0);
+
+    // === EFECTIVO / TRANSFERENCIA ===
+    let tEf=0,tTr=0;
+    db.alumnos.forEach(a=>{(a.pagos||[]).filter(p=>mesDe(p)===mk).forEach(p=>{if(p.medio==='transferencia')tTr+=p.monto;else tEf+=p.monto;});});
+    tEf+=tS; // sueltas siempre efectivo
+
+    // === RENDER ===
+    let h='<div class="section-title" style="margin-top:0">'+mesNombre(mk).toUpperCase()+'</div>';
+    h+='<div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">COBRADO</div><div class="pago-sum-value" style="color:var(--green)">$'+cobrado.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">POR COBRAR</div><div class="pago-sum-value" style="color:'+(porCobrar>0?'var(--red)':'var(--green)')+'">$'+porCobrar.toLocaleString('es-AR')+'</div></div></div>';
+    h+='<div class="card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-around;text-align:center"><div><div style="font-size:.65em;font-weight:700;color:var(--yellow);letter-spacing:1px">EFECTIVO</div><div style="font-size:1.1em;font-weight:700">$'+tEf.toLocaleString('es-AR')+'</div></div><div style="width:1px;background:var(--border)"></div><div><div style="font-size:.65em;font-weight:700;color:var(--accent);letter-spacing:1px">TRANSFERENCIA</div><div style="font-size:1.1em;font-weight:700">$'+tTr.toLocaleString('es-AR')+'</div></div></div></div>';
+    if(slM.length>0){
+        h+='<div class="card" style="margin-bottom:12px"><div class="flex-between"><div style="font-size:.8em;color:var(--text2)">Clases sueltas ('+slM.length+')</div><div style="font-weight:700;color:var(--yellow)">+$'+tS.toLocaleString('es-AR')+'</div></div>';
+        slM.forEach(cs=>{h+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:.78em"><span style="color:var(--text2)">'+cs.nombre+' · '+cs.dia+' '+cs.hora+'</span><span style="font-weight:600">$'+cs.monto.toLocaleString('es-AR')+'</span></div>';});
+        h+='</div>';
+    }
+    h+='<div class="section-title">ALUMNOS</div>';
+    ap.forEach(a=>{const d=a.precio-a.pagado;h+='<div class="pago-alumno-row" onclick="openPagoForm(\''+a.id+'\')"><div><div style="font-weight:600;font-size:.9em">'+a.nombre+'</div><div style="font-size:.7em;color:var(--text2)">'+a.plan+' · $'+a.precio.toLocaleString('es-AR')+'</div></div><div style="text-align:right"><div style="font-weight:700;font-size:.85em;color:'+(d>0?'var(--red)':'var(--green)')+'">'+(d>0?'Debe $'+d.toLocaleString('es-AR'):'AL DÍA')+'</div><div style="font-size:.65em;color:var(--text2)">Pagó $'+a.pagado.toLocaleString('es-AR')+'</div></div></div>';});
+    h+='<button class="btn btn-accent btn-full" style="margin-top:16px" onclick="cerrarMesManual()">CERRAR '+mesNombre(mk).toUpperCase()+'</button>';
+    if(db.mesesCerrados.length){
+        h+='<div class="section-title" style="margin-top:24px">MESES ANTERIORES</div>';
+        db.mesesCerrados.forEach(mc=>{
+            h+='<div class="card" style="margin-bottom:8px"><div style="font-weight:600;font-size:.9em;margin-bottom:6px">'+mesNombre(mc.mes)+'</div><div style="display:flex;justify-content:space-between;font-size:.8em"><span style="color:var(--text2)">'+(mc.alumnos||0)+' alumnos · '+(mc.sueltas||0)+' extras</span><span style="font-weight:700;color:var(--green)">$'+(mc.totalCobrado||0).toLocaleString('es-AR')+'</span></div></div>';
+        });
+    }
+    document.getElementById('pagos-content').innerHTML=h;
+}
+function toggleAccordion(i){document.getElementById('accordion-'+i).classList.toggle('open');document.getElementById('arrow-'+i).classList.toggle('open');}
+
+function openClaseModal(h){
+    curHora=h;const lid=curDay+'_'+h;if(!db.logs[lid])db.logs[lid]=[];
+    const fij=db.alumnos.filter(a=>a.clases.includes(curDay+' '+h));const hoy=todayKey();const logsHoy=db.logs[lid].filter(l=>l.fecha===hoy);const fN=logsHoy.filter(l=>l.t==='f').map(l=>l.n);const ext=logsHoy.filter(l=>l.t==='e');const rcs=logsHoy.filter(l=>l.t==='r');const ocu=fij.length-fN.length+ext.length+rcs.length,lib=db.cupoMax-ocu;
+    let m='<div class="modal-title">'+curDay+' '+h+'</div><div class="modal-subtitle">'+ocu+' ocupados · '+lib+' libre'+(lib!==1?'s':'')+' de '+db.cupoMax+'</div>';
+    if(fij.length){m+='<div class="section-title" style="margin-top:8px">FIJOS</div>';fij.forEach(a=>{const isF=fN.includes(a.nombre);m+='<div class="asist-item"><span class="asist-name '+(isF?'falta':'')+'">'+a.nombre+'</span><button class="btn '+(isF?'btn-green':'btn-red')+' btn-sm" onclick="toggleFalta(\''+a.nombre+'\')">'+(isF?'ASISTE':'FALTA')+'</button></div>';});}
+    if(ext.length){m+='<div class="section-title">CLASES SUELTAS</div>';ext.forEach((e,i)=>{
+        const cobrada=e.cobrado;
+        if(cobrada){
+            m+='<div class="asist-item"><span class="asist-name">'+e.n+' <span class="extra-badge">$'+e.paid.toLocaleString('es-AR')+'</span></span><button class="btn btn-red btn-sm" onclick="removeExtra('+i+')">QUITAR</button></div>';
+        }else{
+            m+='<div class="asist-item"><span class="asist-name">'+e.n+' <span class="extra-badge" style="background:var(--red-dim);color:var(--red)">PENDIENTE</span></span><div style="display:flex;gap:6px"><button class="btn btn-green btn-sm" onclick="cobrarSuelta('+i+')">COBRAR</button><button class="btn btn-red btn-sm" onclick="removeExtra('+i+')">QUITAR</button></div></div>';
+        }
+    });}
+    if(rcs.length){m+='<div class="section-title">RECUPEROS</div>';rcs.forEach((r,i)=>{m+='<div class="asist-item"><span class="asist-name">'+r.n+' <span class="recup-badge">RECUPERO</span></span><button class="btn btn-red btn-sm" onclick="removeRecupero('+i+')">QUITAR</button></div>';});}
+    if(lib>0){const pr=db.precioClaseSuelta||0;m+='<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)"><div class="section-title" style="margin-top:0">OCUPAR CUPO</div><div class="medio-toggle" style="margin-bottom:10px"><button class="medio-opt active" id="tipo-suelta" onclick="setTipoCupo(\'suelta\')">CLASE SUELTA'+(pr?' $'+pr.toLocaleString('es-AR'):'')+'</button><button class="medio-opt" id="tipo-recup" onclick="setTipoCupo(\'recupero\')">RECUPERO</button></div><select class="form-select" id="modal-sel" onchange="document.getElementById(\'modal-vis\').style.display=this.value===\'__VIS__\'?\'block\':\'none\'"><option value="">Seleccionar...</option><option value="__VIS__">VISITANTE</option>'+db.alumnos.filter(a=>!a.clases.includes(curDay+' '+h)).map(a=>'<option value="'+a.nombre+'">'+a.nombre+'</option>').join('')+'</select><input class="form-input" id="modal-vis" placeholder="Nombre visitante..." style="display:none;margin-top:8px"><button class="btn btn-accent btn-full" onclick="addCupo()">AÑADIR A CLASE</button></div>';}
+    else{m+='<div style="margin-top:16px;padding:16px;background:var(--red-dim);border-radius:var(--radius-sm);text-align:center"><span style="color:var(--red);font-weight:700;font-size:.85em">CLASE COMPLETA</span></div>';}
+    showModal(m);
+}
+
+function toggleFalta(n){const lid=curDay+'_'+curHora;const hoy=todayKey();const i=db.logs[lid].findIndex(l=>l.n===n&&l.t==='f'&&l.fecha===hoy);if(i>-1)db.logs[lid].splice(i,1);else db.logs[lid].push({n:n,t:'f',fecha:hoy});save();openClaseModal(curHora);renderClases();}
+
+let tipoCupo='suelta';
+function setTipoCupo(t){tipoCupo=t;document.getElementById('tipo-suelta').classList.toggle('active',t==='suelta');document.getElementById('tipo-recup').classList.toggle('active',t==='recupero');const sel=document.getElementById('modal-sel');const vo=sel.querySelector('option[value="__VIS__"]');if(vo)vo.style.display=t==='recupero'?'none':'';if(sel.value==='__VIS__'&&t==='recupero'){sel.value='';document.getElementById('modal-vis').style.display='none';}}
+
+function addCupo(){
+    const sel=document.getElementById('modal-sel').value;
+    let nom=sel==='__VIS__'?document.getElementById('modal-vis').value.trim():sel;
+    if(!nom)return;
+    const lid=curDay+'_'+curHora;
+    if(tipoCupo==='recupero'){
+        db.logs[lid].push({n:nom,t:'r',fecha:todayKey()});
+    }else{
+        const pr=db.precioClaseSuelta||0;
+        // Solo agenda, NO cobra. paid guarda el precio de referencia, cobrado=false
+        db.logs[lid].push({n:nom,t:'e',paid:pr,fecha:todayKey(),cobrado:false});
+    }
+    tipoCupo='suelta';
+    save();openClaseModal(curHora);renderClases();
+}
+
+function cobrarSuelta(i){
+    const lid=curDay+'_'+curHora;const hoy=todayKey();
+    const exts=db.logs[lid].filter(l=>l.t==='e'&&l.fecha===hoy);
+    const e=exts[i];
+    const pr=e.paid||db.precioClaseSuelta||0;
+    const monto=prompt('Monto a cobrar:',pr);
+    if(monto===null)return;
+    const m=parseInt(monto);
+    if(isNaN(m)||m<0)return alert('Monto inválido');
+    // Marcar como cobrado en el log
+    e.cobrado=true;
+    e.paid=m;
+    // Registrar en clasesSueltas para el balance
+    db.clasesSueltas.push({nombre:e.n,fecha:hoy,mes:db.mesAbierto,monto:m,dia:curDay,hora:curHora});
+    save();openClaseModal(curHora);renderClases();renderPagos();updateHomeSubs();
+}
+
+function removeExtra(i){
+    const lid=curDay+'_'+curHora;const hoy=todayKey();
+    const exts=db.logs[lid].filter(l=>l.t==='e'&&l.fecha===hoy);
+    const t=exts[i];
+    // Si estaba cobrada, quitar del balance
+    if(t.cobrado){
+        const ci=db.clasesSueltas.findIndex(cs=>cs.nombre===t.n&&cs.dia===curDay&&cs.hora===curHora&&cs.fecha===t.fecha);
+        if(ci>-1)db.clasesSueltas.splice(ci,1);
+    }
+    db.logs[lid].splice(db.logs[lid].indexOf(t),1);
+    save();openClaseModal(curHora);renderClases();renderPagos();updateHomeSubs();
+}
+function removeRecupero(i){const lid=curDay+'_'+curHora;const hoy=todayKey();const rcs=db.logs[lid].filter(l=>l.t==='r'&&l.fecha===hoy);db.logs[lid].splice(db.logs[lid].indexOf(rcs[i]),1);save();openClaseModal(curHora);renderClases();}
+
+function openAlumnoForm(eId){
+    const a=eId?db.alumnos.find(x=>x.id===eId):null;const pOpts=db.planes.map(p=>'<option value="'+p.id+'" '+(a&&a.planId===p.id?'selected':'')+'>'+p.nombre+' ('+p.veces+'x/sem · $'+p.precio.toLocaleString('es-AR')+')</option>').join('');const sp=a?db.planes.find(p=>p.id===a.planId):db.planes[0];const n=sp?sp.veces:1;let ch='';for(let i=0;i<(a?Math.max(n,a.clases.length):n);i++){const ex=a&&a.clases[i]?a.clases[i].split(' '):['',''];ch+=buildClaseRow(i,ex[0],ex[1]);}
+    let m='<div class="modal-title">'+(a?'Editar':'Nuevo')+' Alumno</div><div class="form-group"><label class="form-label">NOMBRE</label><input class="form-input" id="frm-nombre" value="'+(a?a.nombre:'')+'" placeholder="Nombre completo..."></div><div class="form-group"><label class="form-label">PLAN</label><select class="form-select" id="frm-plan" onchange="updateClaseSlots()"><option value="">Seleccionar...</option>'+pOpts+'</select></div><div class="form-group"><label class="form-label">CLASES ASIGNADAS</label><div id="frm-clases" class="clase-assign-grid">'+ch+'</div></div><button class="btn btn-accent btn-full" onclick="saveAlumno(\''+(eId||'')+'\')">'+(a?'GUARDAR':'CREAR ALUMNO')+'</button>';
+    if(a)m+='<button class="btn btn-red btn-full" onclick="deleteAlumno(\''+a.id+'\')">ELIMINAR</button>';
+    showModal(m);
+}
+function buildClaseRow(idx,sD,sH){const dO=DIAS_REF.filter(d=>db.dias.includes(d)).map(d=>'<option value="'+d+'" '+(d===sD?'selected':'')+'>'+DIAS_SHORT[d]+'</option>').join('');const hO=db.horarios.sort().map(h=>'<option value="'+h+'" '+(h===sH?'selected':'')+'>'+h+'</option>').join('');return'<div class="clase-assign-row"><select class="form-select" style="flex:1" data-field="dia"><option value="">Día...</option>'+dO+'</select><select class="form-select" style="flex:1" data-field="hora"><option value="">Hora...</option>'+hO+'</select></div>';}
+function updateClaseSlots(){const pl=db.planes.find(p=>p.id===document.getElementById('frm-plan').value);if(!pl)return;let h='';for(let i=0;i<pl.veces;i++)h+=buildClaseRow(i,'','');document.getElementById('frm-clases').innerHTML=h;}
+function saveAlumno(eId){const nom=document.getElementById('frm-nombre').value.trim();const plId=document.getElementById('frm-plan').value;if(!nom||!plId)return alert('Completá nombre y plan');const cls=[];document.querySelectorAll('#frm-clases .clase-assign-row').forEach(r=>{const d=r.querySelector('[data-field="dia"]').value,h=r.querySelector('[data-field="hora"]').value;if(d&&h)cls.push(d+' '+h);});if(eId){const a=db.alumnos.find(x=>x.id===eId);a.nombre=nom;a.planId=plId;a.clases=cls;}else db.alumnos.push({id:'a'+Date.now(),nombre:nom,planId:plId,clases:cls,pagos:[]});save();closeModalDirect();renderAll();updateHomeSubs();}
+function deleteAlumno(id){if(!confirm('¿Eliminar?'))return;db.alumnos=db.alumnos.filter(a=>a.id!==id);save();closeModalDirect();renderAll();updateHomeSubs();}
+
+function openAlumnoDetail(id){const a=db.alumnos.find(x=>x.id===id),pl=db.planes.find(p=>p.id===a.planId);let m='<div class="modal-title">'+a.nombre+'</div><div class="modal-subtitle">'+(pl?pl.nombre:'Sin plan')+' · '+a.clases.length+' clase'+(a.clases.length!==1?'s':'')+'/sem</div><div class="section-title" style="margin-top:8px">CLASES ASIGNADAS</div>';a.clases.forEach(c=>{m+='<div style="padding:10px 0;border-bottom:1px solid var(--border);font-size:.9em">'+c+'</div>';});m+='<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-accent" style="flex:1" onclick="openAlumnoForm(\''+a.id+'\')">EDITAR</button><button class="btn btn-ghost" style="flex:1" onclick="openPagoForm(\''+a.id+'\')">PAGOS</button></div>';showModal(m);}
+
+function openPagoForm(aId){
+    const a=db.alumnos.find(x=>x.id===aId),pl=db.planes.find(p=>p.id===a.planId);const mk=db.mesAbierto;const pg=(a.pagos||[]).filter(p=>mesDe(p)===mk).reduce((s,p)=>s+p.monto,0);const pr=pl?pl.precio:0,de=Math.max(0,pr-pg);
+    let m='<div class="modal-title">'+a.nombre+'</div><div class="modal-subtitle">'+(pl?pl.nombre:'—')+' · $'+pr.toLocaleString('es-AR')+'/mes</div><div class="pago-summary"><div class="pago-sum-card"><div class="pago-sum-label">PAGADO</div><div class="pago-sum-value" style="color:var(--green)">$'+pg.toLocaleString('es-AR')+'</div></div><div class="pago-sum-card"><div class="pago-sum-label">DEBE</div><div class="pago-sum-value" style="color:'+(de>0?'var(--red)':'var(--green)')+'">$'+de.toLocaleString('es-AR')+'</div></div></div>';
+    m+='<div class="form-group"><label class="form-label">REGISTRAR PAGO</label><input class="form-input" id="frm-pago" type="number" placeholder="Monto..." value="'+(de>0?de:pr)+'"></div><div class="form-group"><label class="form-label">MEDIO DE PAGO</label><div class="medio-toggle"><button class="medio-opt active" id="medio-ef" onclick="setMedioPago(\'efectivo\')">EFECTIVO</button><button class="medio-opt" id="medio-tr" onclick="setMedioPago(\'transferencia\')">TRANSF.</button></div></div><button class="btn btn-accent btn-full" onclick="registrarPago(\''+a.id+'\')">REGISTRAR PAGO</button>';
+    const pagos=[...(a.pagos||[])].sort((a,b)=>b.fecha.localeCompare(a.fecha));
+    if(pagos.length){m+='<div class="section-title">HISTORIAL</div>';pagos.forEach((p,i)=>{const ml=p.medio==='transferencia'?'TRANSF':'EFECT';const mc=p.medio==='transferencia'?'var(--accent)':'var(--yellow)';m+='<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:.85em"><div><span style="color:var(--text2)">'+p.fecha+'</span><br><span style="font-size:.75em;color:'+mc+';font-weight:600">'+ml+'</span></div><div style="display:flex;align-items:center;gap:10px"><span style="font-weight:700;color:var(--green)">+$'+p.monto.toLocaleString('es-AR')+'</span><button class="btn btn-red btn-sm" style="padding:4px 10px" onclick="deletePago(\''+a.id+'\','+i+')">×</button></div></div>';});}
+    showModal(m);
+}
+let medioPagoSel='efectivo';
+function setMedioPago(m){medioPagoSel=m;document.getElementById('medio-ef').classList.toggle('active',m==='efectivo');document.getElementById('medio-tr').classList.toggle('active',m==='transferencia');}
+function registrarPago(aId){const mt=parseInt(document.getElementById('frm-pago').value);if(!mt||mt<=0)return;db.alumnos.find(x=>x.id===aId).pagos.push({monto:mt,fecha:new Date().toISOString().slice(0,10),mes:db.mesAbierto,medio:medioPagoSel});medioPagoSel='efectivo';save();openPagoForm(aId);renderPagos();updateHomeSubs();}
 function deletePago(aId,idx){if(!confirm('¿Eliminar pago?'))return;const a=db.alumnos.find(x=>x.id===aId);const s=[...a.pagos].sort((a,b)=>b.fecha.localeCompare(a.fecha));a.pagos.splice(a.pagos.indexOf(s[idx]),1);save();openPagoForm(aId);renderPagos();updateHomeSubs();}
 
 function renderConfig(){
